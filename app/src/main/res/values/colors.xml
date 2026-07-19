@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Daftarkan warna hex Anda di sini -->
+    <color name="game_background">#0F172A</color>
+</resources>
+
