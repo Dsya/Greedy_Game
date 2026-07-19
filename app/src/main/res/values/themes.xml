@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.GreedyGame" parent="Theme.AppCompat.Light.NoActionBar">
+        <!-- Menggunakan referensi resmi dari colors.xml (AAPT2 tidak akan eror lagi) -->
         <item name="android:statusBarColor">@color/game_background</item>
         <item name="android:windowBackground">@color/game_background</item>
     </style>
 </resources>
-
