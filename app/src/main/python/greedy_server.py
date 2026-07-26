@@ -662,6 +662,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Indonesian Rummy (Remi) Jaringan Lokal</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
         body { background-color: #0b1329; color: #f1f5f9; }
         .felt-table {
@@ -695,6 +696,11 @@ HTML_CONTENT = """<!DOCTYPE html>
         <div id="server-info-box" class="bg-slate-950 border border-slate-800/70 rounded-xl px-4 py-2 mb-4 text-center">
             <p class="text-[10px] text-slate-500 uppercase tracking-wide mb-0.5">Device lain sambungkan ke</p>
             <p id="server-info-text" class="text-sm font-mono font-bold text-emerald-400">memuat...</p>
+        </div>
+        <div id="qr-box" class="bg-slate-950 border border-slate-800/70 rounded-xl px-4 py-4 mb-6 flex flex-col items-center gap-2">
+            <p class="text-[10px] text-slate-500 uppercase tracking-wide">Atau scan QR untuk gabung</p>
+            <div id="qrcode" class="bg-white p-2 rounded-lg"></div>
+            <p id="qr-fallback-text" class="text-[10px] text-slate-600 hidden">Kamera bermasalah? Buka browser lalu ketik alamat di atas.</p>
         </div>
         <div class="bg-slate-950 rounded-2xl p-4 mb-6">
             <ul id="lobby-players-list" class="space-y-2"></ul>
@@ -940,14 +946,39 @@ HTML_CONTENT = """<!DOCTYPE html>
             return await res.json();
         }
 
+        let qrRendered = false;
+
         async function loadServerInfo() {
             try {
                 const info = await apiGet("/api/server_info");
+                const url = `http://${info.ip}:${info.port}`;
                 const el = document.getElementById("server-info-text");
-                if (el) el.textContent = `http://${info.ip}:${info.port}`;
+                if (el) el.textContent = url;
+
+                // Generate QR code cuma sekali (alamat tidak berubah selama server hidup)
+                if (!qrRendered) {
+                    const qrEl = document.getElementById("qrcode");
+                    if (qrEl && typeof QRCode !== "undefined") {
+                        try {
+                            new QRCode(qrEl, {
+                                text: url,
+                                width: 140,
+                                height: 140,
+                                colorDark: "#0b1329",
+                                colorLight: "#ffffff"
+                            });
+                            qrRendered = true;
+                        } catch (qrErr) {
+                            document.getElementById("qr-fallback-text").classList.remove("hidden");
+                        }
+                    } else {
+                        document.getElementById("qr-fallback-text").classList.remove("hidden");
+                    }
+                }
             } catch (e) {
                 const el = document.getElementById("server-info-text");
                 if (el) el.textContent = "Gagal memuat alamat server";
+                document.getElementById("qr-fallback-text").classList.remove("hidden");
             }
         }
 
