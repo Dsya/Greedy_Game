@@ -8,8 +8,10 @@ import time
 import sys
 import threading
 import os
+import mimetypes
 
-BGM_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bgm3.mp3")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BGM_FILE_PATH = os.path.join(BASE_DIR, "bgm3.mp3")
 PORT = 8000
 
 # ==========================================
@@ -49,42 +51,81 @@ def get_card_suit_val(card_str):
     }
     return suit, val_map.get(val_str, 0), val_str
 
+def is_joker(card_str):
+    """Cek apakah sebuah kartu adalah Joker (format: '<suit>-JOKER')."""
+    return card_str.split("-")[1] == "JOKER"
+
 def check_is_sequence(cards_list):
     """
     Sequence: Minimal 3 kartu, suit sama.
     Angka saja (2-10) ATAU Gambar saja (J-Q-K). As (14) tidak boleh masuk sequence.
+
+    Joker: bertindak sebagai wildcard HANYA untuk melengkapi sequence angka 2-10
+    (mengisi kartu yang hilang di tengah atau memperpanjang ujung urutan).
+    Joker TIDAK valid untuk sequence J-Q-K maupun campur dengan As.
     """
     if len(cards_list) < 3:
         return False
-    
+
     parsed = [get_card_suit_val(c) for c in cards_list]
-    suit = parsed[0][0]
-    
-    # Cek apakah suit sama semua
-    if not all(p[0] == suit for p in parsed):
-        return False
-        
-    vals = sorted([p[1] for p in parsed])
-    
-    # As tidak boleh ada di sequence
-    if 14 in vals:
-        return False
-        
-    # Cek apakah berurutan
-    for i in range(len(vals) - 1):
-        if vals[i+1] - vals[i] != 1:
+    jokers = [p for p in parsed if p[2] == "JOKER"]
+    reals = [p for p in parsed if p[2] != "JOKER"]
+
+    if not jokers:
+        # Logika original: tanpa joker sama sekali
+        suit = reals[0][0]
+        if not all(p[0] == suit for p in reals):
             return False
-            
-    # Cek tidak boleh mencampur angka dan gambar (10 tidak berdekatan dengan J)
-    # Angka maksimal 10, Gambar minimal 11 (J)
-    if vals[0] <= 10 and vals[-1] >= 11:
+
+        vals = sorted([p[1] for p in reals])
+
+        # As tidak boleh ada di sequence
+        if 14 in vals:
+            return False
+
+        # Cek apakah berurutan
+        for i in range(len(vals) - 1):
+            if vals[i + 1] - vals[i] != 1:
+                return False
+
+        # Cek tidak boleh mencampur angka dan gambar (10 tidak berdekatan dengan J)
+        if vals[0] <= 10 and vals[-1] >= 11:
+            return False
+
+        return True
+
+    # --- Ada Joker: hanya berlaku untuk sequence angka 2-10 ---
+    if not reals:
+        return False  # tidak masuk akal kombinasi isinya joker semua
+
+    suit = reals[0][0]
+    if not all(p[0] == suit for p in reals):
         return False
-        
-    return True
+
+    vals = [p[1] for p in reals]
+
+    # Rank ganda tidak boleh (sequence butuh angka unik)
+    if len(vals) != len(set(vals)):
+        return False
+
+    # Joker cuma valid melengkapi rentang angka 2-10, tidak boleh nyentuh J/Q/K/A
+    if any(v < 2 or v > 10 for v in vals):
+        return False
+
+    min_v, max_v = min(vals), max(vals)
+    total_length = len(cards_list)  # kartu asli + joker
+
+    # Cari jendela [s, s+total_length-1] yang memuat semua kartu asli, dalam batas 2..10
+    s_min = max(2, max_v - total_length + 1)
+    s_max = min(10 - total_length + 1, min_v)
+
+    return s_min <= s_max
 
 def check_is_set(cards_list):
-    """Set: 3 atau 4 kartu dengan rank/nilai yang sama."""
+    """Set: 3 atau 4 kartu dengan rank/nilai yang sama. Joker TIDAK valid untuk Set."""
     if len(cards_list) < 3 or len(cards_list) > 4:
+        return False
+    if any(is_joker(c) for c in cards_list):
         return False
     parsed = [get_card_suit_val(c) for c in cards_list]
     rank = parsed[0][2]
@@ -92,7 +133,9 @@ def check_is_set(cards_list):
 
 def calculate_card_score(card_str):
     _, val, rank = get_card_suit_val(card_str)
-    if rank == "A":
+    if rank == "JOKER":
+        return 20  # +20 jika ikut dalam meld, -20 jika masih tersisa di tangan
+    elif rank == "A":
         return 15
     elif rank in ["J", "Q", "K"]:
         return 10
@@ -132,6 +175,12 @@ def greedy_suggest(cards):
 
     remaining = list(cards)
     groups = []
+
+    # STEP 0: pisahkan Joker dulu. Joker TIDAK ikut logika SET (tidak valid utk set),
+    # dan baru dipakai belakangan (STEP 2.5) khusus utk melengkapi sequence angka 2-10.
+    joker_pool = [c for c in remaining if is_joker(c)]
+    for c in joker_pool:
+        remaining.remove(c)
 
     # STEP 1: greedy ambil SET, mulai dari rank paling banyak duplikatnya
     rank_map = defaultdict(list)
@@ -174,9 +223,54 @@ def greedy_suggest(cards):
             else:
                 i += 1
 
+    # STEP 2.5: pakai Joker (kalau ada) utk melengkapi sisa cluster angka 2-10
+    # per suit yang hampir jadi sequence (mengisi celah atau memperpanjang ujung).
+    if joker_pool:
+        suit_map2 = defaultdict(list)
+        for c in remaining:
+            suit, val, rank = get_card_suit_val(c)
+            if rank not in ("A", "J", "Q", "K"):
+                suit_map2[suit].append((val, c))
+
+        for suit, group in suit_map2.items():
+            group.sort()
+            i = 0
+            while i < len(group) and joker_pool:
+                cluster = [group[i]]
+                jokers_used = 0
+                j = i + 1
+                while j < len(group):
+                    gap = group[j][0] - cluster[-1][0] - 1
+                    if gap == 0:
+                        cluster.append(group[j])
+                        j += 1
+                    elif gap > 0 and jokers_used + gap <= len(joker_pool) and group[j][0] <= 10:
+                        jokers_used += gap
+                        cluster.append(group[j])
+                        j += 1
+                    else:
+                        break
+                if len(cluster) + jokers_used >= 3 and jokers_used > 0:
+                    take_real = [c for _, c in cluster]
+                    take_joker = joker_pool[:jokers_used]
+                    groups.append({"type": "sequence", "cards": take_real + take_joker, "ready": True})
+                    for c in take_real:
+                        remaining.remove(c)
+                    for c in take_joker:
+                        joker_pool.remove(c)
+                    i = j
+                else:
+                    i += 1
+
+    # Joker yang belum terpakai tetap dianggap "floating" tapi sangat berharga
+    # (jangan pernah disarankan untuk dibuang -> rugi -20 poin kalau dibuang percuma).
+    remaining.extend(joker_pool)
+
     # STEP 3: sisa kartu -> hitung skor keterhubungan utk cari kandidat buang
     def connectivity_score(card):
         suit, val, rank = get_card_suit_val(card)
+        if rank == "JOKER":
+            return 99  # joker sangat berharga, jangan pernah jadi kandidat buang
         score = 0
         for c2 in cards:
             if c2 == card:
@@ -263,6 +357,7 @@ def start_game():
     suits = ["S", "H", "D", "C"]
     values = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
     deck = [f"{s}-{v}" for s in suits for v in values]
+    deck += [f"{s}-JOKER" for s in suits]  # 4 kartu Joker (1 per suit) -> total 56 kartu
     random.shuffle(deck)
     
     for p in GAME_STATE["players"]:
@@ -375,6 +470,28 @@ class GameRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(HTML_CONTENT.encode('utf-8'))
+            return
+
+        # ==========================================
+        # STATIC CARD IMAGE SERVING (folder card_pic/ sejajar dengan script)
+        # os.path.basename() mencegah path traversal
+        # ==========================================
+        if path.startswith("/card_pic/"):
+            img_name = os.path.basename(path)
+            img_path = os.path.join(BASE_DIR, "card_pic", img_name)
+            if img_name and os.path.isfile(img_path):
+                mime_type, _ = mimetypes.guess_type(img_path)
+                with open(img_path, 'rb') as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', mime_type or 'application/octet-stream')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'public, max-age=86400')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            self.send_error(404, "Not Found")
             return
 
         if path == "/bgm3.mp3":
@@ -557,6 +674,8 @@ class GameRequestHandler(http.server.BaseHTTPRequestHandler):
                     response_data = {"error": "Bukan giliran Anda"}
                 elif card not in current_player["cards"]:
                     response_data = {"error": "Kartu tidak valid"}
+                elif is_closing and is_joker(card):
+                    response_data = {"error": "Kartu Joker tidak bisa dipakai sebagai kartu penutup (closing card)."}
                 else:
                     current_player["cards"].remove(card)
                     GAME_STATE["discard_pile"].append(card)
@@ -739,7 +858,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             <div id="status-bar" class="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex justify-between items-center">
                 <div>
                     <h2 id="status-message" class="font-black text-lg text-yellow-400">Loading...</h2>
-                    <p id="status-submessage" class="text-xs text-slate-400">Aturan: Wajib punya 1 Sequence sebelum menggelar Set!</p>
+                    <p id="status-submessage" class="text-xs text-slate-400">Aturan: Wajib punya 1 Sequence sebelum menggelar Set! 🃏 Joker = wildcard angka 2-10 (+20 jika digelar / -20 jika sisa di tangan).</p>
                 </div>
                 <div id="action-meld-container" class="hidden gap-2">
                     <button onclick="declareMeld()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-xs font-black shadow-lg">✨ Gelar Kombinasi</button>
@@ -1062,18 +1181,37 @@ HTML_CONTENT = """<!DOCTYPE html>
             btn.textContent = nowMuted ? "🔇 Suara: Mati" : "🔊 Suara: Nyala";
         }
 
-        function getCardHTML(cardStr, clickHandler='', extraClass='', isHandCard=false) {
+        function getCardImageSrc(cardStr) {
             const [suit, val] = cardStr.split("-");
+            const suitFileMap = { "S": "spade", "H": "heart", "D": "diamond", "C": "club" };
+            const valFileMap = { "A": "a", "J": "j", "Q": "q", "K": "k", "JOKER": "joker" };
+            const suitFile = suitFileMap[suit];
+            const valFile = valFileMap[val] || val; // angka 2-10 dipakai apa adanya
+            if (val === "JOKER") {
+                return `/card_pic/joker_${suitFile}.png`;
+            }
+            return `/card_pic/${valFile}_${suitFile}.png`;
+        }
+
+        function getCardHTML(cardStr, clickHandler='', extraClass='', isHandCard=false, sizeClass='w-[45px] h-20') {
+            const [suit, val] = cardStr.split("-");
+            const isJoker = val === "JOKER";
+            const label = isJoker ? "JKR" : val;
             const suitMap = { "S": "♠", "H": "♥", "D": "♦", "C": "♣" };
             const isRed = (suit === "H" || suit === "D");
-            const color = isRed ? "text-red-500 border-red-900/40 bg-slate-950" : "text-slate-200 border-slate-800 bg-slate-950";
+            const badgeColor = isJoker ? "text-fuchsia-400" : (isRed ? "text-red-400" : "text-slate-100");
+            const src = getCardImageSrc(cardStr);
             const onclickAttr = isHandCard ? '' : `onclick="${clickHandler}"`;
             const dragAttr = isHandCard ? `data-card="${cardStr}" onpointerdown="handleCardPointerDown(event, '${cardStr}')"` : '';
             const handClass = isHandCard ? 'hand-card' : '';
+            const jokerRing = isJoker ? 'ring-2 ring-fuchsia-500/50' : '';
+            // Gambar kartu asli berukuran 220x390 (rasio ~0.564). sizeClass default
+            // (45x80) sudah disesuaikan ke rasio itu supaya tidak ada bagian yang
+            // terpotong/cekung di pinggir saat digambar dengan object-contain.
             return `
-                <div ${onclickAttr} ${dragAttr} class="border-2 rounded-xl p-2 flex flex-col justify-between w-14 h-20 text-xs shadow-md transform transition duration-150 cursor-pointer ${handClass} ${color} ${extraClass}">
-                    <div class="flex justify-between font-black"><span>${val}</span><span>${suitMap[suit]}</span></div>
-                    <div class="text-xl text-center font-bold">${suitMap[suit]}</div>
+                <div ${onclickAttr} ${dragAttr} title="${isJoker ? 'JOKER' : val}" class="relative border-2 rounded-md overflow-hidden ${sizeClass} shadow-md transform transition duration-150 cursor-pointer select-none border-slate-800 bg-slate-950 ${handClass} ${jokerRing} ${extraClass}">
+                    <img src="${src}" alt="${label}" draggable="false" class="w-full h-full object-contain pointer-events-none" loading="lazy">
+                    <div class="absolute top-0 left-0 bg-black/75 ${badgeColor} font-black text-[9px] leading-none px-1 py-0.5 rounded-br-lg pointer-events-none">${label}${isJoker ? '' : suitMap[suit]}</div>
                 </div>
             `;
         }
@@ -1294,7 +1432,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     tableMelds.innerHTML += `
                         <div class="bg-slate-950/60 border border-emerald-900/40 p-2 rounded-xl flex flex-col gap-1">
                             <span class="text-[9px] text-emerald-400 font-black truncate">${p.name}:</span>
-                            <div class="flex flex-wrap gap-1">${meld.map(c => getCardHTML(c, '', 'pointer-events-none w-10 h-14 text-[9px]')).join("")}</div>
+                            <div class="flex flex-wrap gap-1">${meld.map(c => getCardHTML(c, '', 'pointer-events-none text-[9px]', false, 'w-8 h-14')).join("")}</div>
                         </div>
                     `;
                 });
@@ -1311,7 +1449,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                 const visibleCards = state.discard_pile.slice(total - visibleCount);
                 let html = '';
                 if (hiddenCount > 0) {
-                    html += `<div class="flex items-center justify-center w-10 h-20 text-[10px] text-slate-500 font-bold">+${hiddenCount}</div>`;
+                    html += `<div class="flex items-center justify-center w-[45px] h-20 text-[10px] text-slate-500 font-bold">+${hiddenCount}</div>`;
                 }
                 html += visibleCards.map((c, i) => {
                     const realIdx = total - visibleCount + i;
